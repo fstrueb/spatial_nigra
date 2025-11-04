@@ -1,0 +1,459 @@
+---
+title: "Figure_5_analysis"
+author: "felix.struebing@med.uni-muenchen.de"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message = FALSE}
+library(nicheDE)
+source('make_metad.R')
+source('helper_functions.R')
+source('../../ggplot_theme_FLS.R')
+source('../ggplot_theme_FLS_nigrapaper.R')
+library(patchwork)
+excludesamples <- read_lines('../resources/excludesamples.txt')
+```
+
+# Import data
+
+```{r}
+metad <- make_metad() %>% 
+    mutate(group = ifelse(group == 'ADLBD', 'ADLBP', group))
+seurat <- readRDS('../resources/seurat_clustered_annotated_4excludesamples_MAGIC.rds')
+# seurat_subset <- subset(seurat, group %in% c('Ctrl', 'iLBD', 'PD'))
+DefaultAssay(seurat) <- 'spatial'
+clusteranno <- data.frame(cluster_numeric = seurat$cluster, cluster_anno = seurat$cluster_anno) %>%
+    remove_rownames() %>% unique()
+common_celltypes <- read_delim('../resources/top_spacexr_weights.tsv')
+Idents(seurat) <- seurat$cluster_anno
+```
+
+# Increased MG abundance in iLBD SNpc?
+
+```{r}
+myCSIDE <- readRDS('../resources/myRCTD_reps_fullmode.rds')
+all_weights <- list()
+for (i in 1:length(myCSIDE@RCTD.reps)){
+    weights <- myCSIDE@RCTD.reps[[i]]@results$weights
+    norm_weights <- normalize_weights(weights)
+    all_weights[i] <- norm_weights
+}
+names(all_weights) <- names(myCSIDE@group_ids)
+```
+
+```{r}
+myclusters <- data.frame(cluster = seurat$cluster_anno) %>% 
+    rownames_to_column('cluster_spot') %>% 
+    mutate(spot = str_sub(cluster_spot, start = -18L),
+           sample = str_sub(cluster_spot, start =  1L, end = -20L)) %>% 
+    select(spot, cluster, sample) %>% 
+    split(., .$sample)
+all(names(myclusters) == names(all_weights))
+cluster_celltypes <- mapply(function(weights, cluster) {
+    # weights <- all_weights[[1]]
+    # cluster = myclusters[[1]]
+    as.data.frame(weights) %>% 
+        rownames_to_column('spot') %>% 
+        pivot_longer(-spot, names_to = 'celltype', values_to = 'weight') %>% 
+        left_join(., cluster, by = 'spot')
+    # group_by(spot) %>%
+    # slice_max(weight, n = 5, with_ties = FALSE)
+}, weights = all_weights, cluster = myclusters, SIMPLIFY = FALSE) %>% rbindlist() %>% 
+    left_join(., metad, by = c('sample' = 'case'))
+```
+
+```{r}
+cluster_celltypes %>% group_by(sample, celltype) %>% 
+    summarize(mean_w = mean(weight)) %>% 
+    filter(grepl('Inh', celltype)) %>% 
+    arrange(-mean_w)
+```
+
+```{r}
+cluster_celltypes %>% group_by(sample, celltype) %>% 
+    summarize(mean_w = mean(weight))
+```
+
+
+### C1QC co-expression
+
+More MG in spots with high C1QC?
+
+Get stats:
+
+```{r fig.height=4, fig.width=5}
+c1qc_counts <- FetchData(seurat, vars = c('C1QC', 'group', 'ident'), layer = 'counts') %>% 
+    rownames_to_column('sample_bc') %>% 
+    separate(sample_bc, into = c('sample', 'spot'), sep = '_') %>% 
+    filter(C1QC > 0) %>% 
+    left_join(., cluster_celltypes, by = c('sample', 'spot')) %>% 
+    filter(weight > 0) %>%
+    group_by(celltype, ident) %>% 
+    nest() %>% 
+    mutate(fit = map(data, ~lm(C1QC ~ weight, data = .)),
+           tidy = map(fit, tidy)) %>% 
+    select(celltype, ident, tidy) %>% 
+    unnest(tidy)
+```
+
+```{r}
+c1qc_counts %>% 
+    filter(p.value < 0.05 & estimate > 0) %>% 
+    filter(ident == 'SNpc' & term != '(Intercept)') %>% 
+    arrange(p.value)
+```
+
+### GPRIN1 co-expression
+
+```{r fig.height=4, fig.width=5}
+gprin1_counts <- FetchData(seurat, vars = c('GPRIN1', 'group', 'ident'), layer = 'counts') %>% 
+    rownames_to_column('sample_bc') %>% 
+    separate(sample_bc, into = c('sample', 'spot'), sep = '_') %>% 
+    filter(GPRIN1 > 0) %>% 
+    left_join(., cluster_celltypes, by = c('sample', 'spot')) %>% 
+    filter(weight > 0) %>%
+    group_by(celltype, ident) %>% 
+    nest() %>% 
+    mutate(fit = map(data, ~lm(GPRIN1 ~ weight, data = .)),
+           tidy = map(fit, tidy)) %>% 
+    select(celltype, ident, tidy) %>% 
+    unnest(tidy)
+```
+
+```{r}
+gprin1_counts %>% 
+    filter(p.value < 0.05 & estimate > 0) %>% 
+    filter(ident == 'SNpc' & term != '(Intercept)') %>% 
+    arrange(p.value)
+```
+
+```{r}
+temp <- as.data.frame(AverageExpression(seurat, features = 'CD4', assays = 'spatial', group.by = c('group', 'cluster_anno'))) %>% rownames_to_column('gene') %>% pivot_longer(-gene)
+temp %>% mutate(group = str_extract(pattern = '^([^_]+)', str_sub(name, start = 9L))) %>% 
+    mutate(cluster = str_extract(pattern = '(?<=_).*', name)) %>% 
+    ggplot(aes(x = group, y = value, fill = cluster)) +
+    geom_col(color = 'black') +
+    facet_wrap(~cluster) +
+    labs(title = 'Average CD4 expression among groups and clusters') +
+    theme_patch()
+```
+
+
+
+
+
+
+
+
+## 5A
+
+```{r}
+c1qc_counts %>% filter(term == 'weight') %>% 
+    arrange(p.value) %>% 
+    filter(p.value < 0.05 & estimate > 0) %>% 
+    filter(ident == 'SNpc') %>%
+    ggplot(aes(x = reorder(celltype, estimate), y = estimate, ymin = estimate - std.error, ymax = estimate + std.error, fill = -log10(p.value))) +
+    geom_col(color = 'black') +
+    geom_errorbar(width = 0.2) +
+    scale_fill_gradient(low = 'yellow', high = 'red') +
+    labs(x = 'Deconvoluted cell type', y = 'Effect size [C1QC ~ cell type weight]') +
+    coord_flip() +
+    theme_patch() +
+    facet_wrap(~ident, scales = 'free')
+```
+
+## Supp. Fig. 7
+
+```{r}
+lapply(unique(c1qc_counts$ident), function(x) {
+    p_t <- c1qc_counts %>% filter(term == 'weight') %>% 
+        arrange(p.value) %>% 
+        filter(p.value < 0.05 & estimate > 0) %>% 
+        filter(ident == x) %>%
+        ggplot(aes(x = reorder(celltype, estimate), y = estimate, ymin = estimate - std.error, ymax = estimate + std.error, fill = -log10(p.value))) +
+        geom_col(color = 'black') +
+        geom_errorbar(width = 0.2) +
+        scale_fill_gradient(low = 'yellow', high = 'red') +
+        labs(x = 'Deconvoluted cell type', y = 'Effect size [C1QC ~ cell type weight]', subtitle = x) +
+        coord_flip() +
+        theme_patch() +
+        facet_wrap(~ident, scales = 'free')
+    p_t
+})
+
+```
+
+Find best markers for Inhibitory cluster:
+
+```{r}
+# reference <-  readRDS('../spatial_nigra_v2/resources/macosko_reference_obj.rds')
+# ref_seurat <- CreateSeuratObject(counts = reference@counts, assay = 'reference', meta.data = as.data.frame(reference@cell_types))
+# Idents(ref_seurat) <- ref_seurat$`reference@cell_types`
+# ref_seurat <- ref_seurat %>% 
+#     NormalizeData() %>% 
+#     ScaleData()
+# saveRDS(ref_seurat, 'resources/macosko_reference_seurat.rds', compress = FALSE)
+# inh_markers <- FindMarkers(ref_seurat, ident.1 = 'Inh_PAX5_VCAN', ident.2 = NULL)
+# saveRDS(inh_markers, 'resources/INH_PAX5_VCAN_markers.rds')
+inh_markers <- readRDS('resources/INH_PAX5_VCAN_markers.rds') 
+cluster_celltypes %>% 
+    filter(celltype == 'Inh_PAX5_VCAN') %>% 
+    group_by(cluster, sample) %>% 
+    summarize(mean_weight = mean(weight)) %>% 
+    filter(cluster == 'SNpc') %>% 
+    arrange(-mean_weight)
+```
+
+```{r}
+rownames(seurat) %in% rownames(inh_markers)
+inh_markers %>% 
+    rownames_to_column('gene') %>% 
+    filter(gene %in% rownames(seurat))
+```
+
+<!-- ```{r} -->
+<!-- DefaultAssay(seurat) <- 'MAGIC_spatial' -->
+<!-- SpatialFeaturePlot(seurat, features = 'GABRA1', image.scale = 'hires', pt.size.factor = 3, image.alpha = 0.3, images = ilbd_img) -->
+<!-- ``` -->
+
+
+
+
+
+
+
+Get co-expression score for iLBD and Ctrl cases:
+
+
+```{r}
+DefaultAssay(seurat) <- 'MAGIC_spatial'
+make_composite_score <- function(df) {
+    data.frame(sum_expr = rowSums(df)) %>% 
+        rownames_to_column('sample_spot') %>% 
+        separate(sample_spot, into = c('sample', 'spot'), sep = '_') %>% 
+        left_join(., cluster_celltypes, by = c('sample', 'spot')) %>% 
+        select(sample, spot, sum_expr, celltype, weight, cluster, group)
+}
+```
+
+```{r warning = FALSE}
+blends_ilbd_gad1 <- SpatialFeaturePlotBlend(seurat, features = c('C1QC', 'GAD1'), images = metad %>% filter(group == 'iLBD') %>% pull(case), 
+                                            pt.size.factor = 3, 
+                                            image.scale = 'hires', 
+                                            image.alpha = 0.4, 
+                                            top_left = "blue", 
+                                            bottom_right = "orange",
+                                            bottom_left = "white", 
+                                            top_right = "limegreen")
+blends_ctrl_gad1 <- SpatialFeaturePlotBlend(seurat, features = c('C1QC', 'GAD1'), images = metad %>% filter(group == 'Ctrl') %>% pull(case), 
+                                            pt.size.factor = 3, 
+                                            image.scale = 'hires', 
+                                            image.alpha = 0.4, 
+                                            top_left = "blue", 
+                                            bottom_right = "orange",
+                                            bottom_left = "white", 
+                                            top_right = "limegreen")
+scores_ilbd_gad1 <- lapply(blends_ilbd_gad1[[2]], make_composite_score) %>% rbindlist()
+scores_ctrl_gad1 <- lapply(blends_ctrl_gad1[[2]], make_composite_score) %>% rbindlist()
+```
+
+```{r}
+temp <- scores_ilbd_gad1 %>% 
+    filter(celltype %in% c('MG_TSPO_VIM', 'SOX6_DDT')) %>% 
+    filter(cluster == 'SNpc') %>% 
+    pivot_wider(names_from = 'celltype', values_from = 'weight') %>% 
+    mutate(norm_ct_expr = sum_expr*MG_TSPO_VIM*SOX6_DDT) %>% 
+    bind_rows(scores_ctrl_gad1 %>% 
+                  filter(celltype %in% c('MG_TSPO_VIM', 'SOX6_DDT')) %>% 
+                  filter(cluster == 'SNpc') %>% 
+                  pivot_wider(names_from = 'celltype', values_from = 'weight') %>% 
+                  mutate(norm_ct_expr = sum_expr*MG_TSPO_VIM*SOX6_DDT))
+temp %>% 
+    ggplot(aes(x = group, y = norm_ct_expr)) +
+    geom_boxplot() +
+    stat_compare_means(comparisons = list(c('Ctrl', 'iLBD')))
+```
+
+
+
+```{r}
+scores_gad1 <- scores_ilbd_gad1 %>%
+    filter(celltype %in% c('MG_TSPO_VIM', 'Inh_PAX5_VCAN')) %>% 
+    pivot_wider(names_from = 'celltype', values_from = 'weight') %>% 
+    mutate(norm_ct_expr = sum_expr*Inh_PAX5_VCAN*MG_TSPO_VIM) %>% 
+    bind_rows(scores_ctrl_gad1 %>%
+                  filter(celltype %in% c('MG_TSPO_VIM', 'Inh_PAX5_VCAN')) %>% 
+                  pivot_wider(names_from = 'celltype', values_from = 'weight') %>% 
+                  mutate(norm_ct_expr = sum_expr*Inh_PAX5_VCAN*MG_TSPO_VIM))
+```
+
+## 5b
+
+```{r}
+scores_gad1 %>% 
+    filter(cluster == 'SNpc') %>% 
+    ggplot(aes(x = group, y = norm_ct_expr, fill = group)) +
+    geom_violin() +
+    scale_fill_discrete(type = c( group_colors %>% filter(group == 'Ctrl') %>% pull(color), group_colors %>% filter(group == 'iLBD') %>% pull(color))) +
+    geom_point(alpha = 0.3) +
+    stat_compare_means(comparisons = list(c('Ctrl', 'iLBD')), vjust = -0.2, method = 'wilcox', method.args = list(alternative = 'less'), label = 'p.signif') +
+    scale_y_continuous(expand = expansion(mult = 0.3)) +
+    theme_patch() +
+    guides(fill = 'none') +
+    labs(x = '', y = 'C1QC coexpression score', title = 'C1QC + GAD1') +
+    facet_wrap(~cluster, scales = 'free')
+```
+
+Same with SLC6A3:
+
+```{r warning = FALSE, message = FALSE}
+blends_ilbd_DA <- SpatialFeaturePlotBlend(seurat, features = c('C1QC', 'SLC6A3'), images = metad %>% filter(group == 'iLBD') %>% pull(case), 
+                                          pt.size.factor = 3, 
+                                          image.scale = 'hires', 
+                                          image.alpha = 0.4, 
+                                          top_left = "blue", 
+                                          bottom_right = "orange",
+                                          bottom_left = "white", 
+                                          top_right = "limegreen")
+blends_ctrl_DA <- SpatialFeaturePlotBlend(seurat, features = c('C1QC', 'SLC6A3'), images = metad %>% filter(group == 'Ctrl') %>% pull(case), 
+                                          pt.size.factor = 3, 
+                                          image.scale = 'hires', 
+                                          image.alpha = 0.4, 
+                                          top_left = "blue", 
+                                          bottom_right = "orange",
+                                          bottom_left = "white", 
+                                          top_right = "limegreen")
+blends_ilbd_DA_GAD <- SpatialFeaturePlotBlend(seurat, features = c('GAD1', 'SLC6A3'), images = metad %>% filter(group == 'iLBD') %>% pull(case), 
+                                              pt.size.factor = 3, 
+                                              image.scale = 'hires', 
+                                              image.alpha = 0.4, 
+                                              top_left = "dodgerblue1", 
+                                              bottom_right = "orange",
+                                              bottom_left = "white", 
+                                              top_right = "#FF0000", combine = TRUE)
+scores_ilbd_DA <- lapply(blends_ilbd_DA[[2]], make_composite_score) %>% rbindlist()
+scores_ctrl_DA <- lapply(blends_ctrl_DA[[2]], make_composite_score) %>% rbindlist()
+```
+
+
+```{r}
+scores_DA <- scores_ilbd_DA %>%
+    filter(celltype %in% c('MG_TSPO_VIM', 'Inh_PAX5_VCAN')) %>% 
+    pivot_wider(names_from = 'celltype', values_from = 'weight') %>% 
+    mutate(norm_ct_expr = sum_expr*Inh_PAX5_VCAN*MG_TSPO_VIM) %>% 
+    bind_rows(scores_ctrl_DA %>%
+                  filter(celltype %in% c('MG_TSPO_VIM', 'Inh_PAX5_VCAN')) %>% 
+                  pivot_wider(names_from = 'celltype', values_from = 'weight') %>% 
+                  mutate(norm_ct_expr = sum_expr*Inh_PAX5_VCAN*MG_TSPO_VIM))
+```
+
+```{r}
+scores_DA %>% 
+    filter(cluster == 'SNpc') %>% 
+    ggplot(aes(x = group, y = norm_ct_expr, fill = group)) +
+    geom_violin() +
+    scale_fill_discrete(type = c( group_colors %>% filter(group == 'Ctrl') %>% pull(color), group_colors %>% filter(group == 'iLBD') %>% pull(color))) +
+    geom_point(alpha = 0.3) +
+    stat_compare_means(comparisons = list(c('Ctrl', 'iLBD')), vjust = -0.2, method = 'wilcox', method.args = list(alternative = 'less'), label = 'p.signif') +
+    scale_y_continuous(expand = expansion(mult = 0.3)) +
+    theme_patch() +
+    labs(x = '', y = 'C1QC coexpression score', title = 'C1QC + SLC6A3') +
+    guides(fill = 'none') +
+    facet_wrap(~cluster, scales = 'free')
+```
+
+Export raw data:
+
+```{r}
+temp <- scores_DA %>% 
+    filter(cluster == 'SNpc') %>%
+    dplyr::select(sample, spot, group, normalized_coexpression = norm_ct_expr) %>% 
+    mutate(coexpression = 'C1QC + SLC6A3') %>% 
+    bind_rows(scores_gad1 %>% 
+                  filter(cluster == 'SNpc') %>% 
+                  dplyr::select(sample, spot, group, normalized_coexpression = norm_ct_expr) %>% 
+                  mutate(coexpression = 'C1QC + GAD1'))
+# write_tsv(temp, 'C1QC_coexpression_data.tsv')
+```
+
+## 5c
+
+```{r}
+ilbd_img <- 'PDC082'
+ctrL_img <- 'C064'
+```
+
+```{r}
+DefaultAssay(seurat) <- 'MAGIC_spatial'
+p5c3 <- SpatialFeaturePlotBlend(seurat, features = c('GABRA4', 'SLC6A3'), images = ilbd_img,
+                                # keep.scale = 'feature',
+                                pt.size.factor = 3, 
+                                image.scale = 'hires', 
+                                image.alpha = 0, 
+                                top_left = "dodgerblue1", 
+                                bottom_right = "orange",
+                                bottom_left = "white", 
+                                top_right = "#FF0000", combine = TRUE)
+# pdf('Fig5_inhibitory_localization.pdf', width = 8, height = 4)
+p5c3
+# dev.off()
+```
+## 5d
+
+```{r}
+seurat_subset <- subset(seurat, group %in% 'iLBD')
+DefaultAssay(seurat_subset) <- 'spatial'
+```
+
+```{r}
+varfeats <- FindVariableFeatures(seurat_subset)
+obj <- RunPCA(varfeats, assay = "spatial", verbose = FALSE,
+              rev.pca = TRUE, reduction.name = "pca.rev",
+              reduction.key="PCR_", npcs = 50)
+# obj <- readRDS('resources/seurat_obj_final_PCArev.rds')
+
+E <- obj@reductions$pca.rev@feature.loadings
+```
+
+
+```{r}
+library(msigdbr)
+library(fgsea)
+pathwaysDF <- msigdbr("human", collection="C5")
+pathways <- split(pathwaysDF$gene_symbol, pathwaysDF$gs_name)
+```
+
+```{r}
+gesecaRes <- geseca(pathways, E, minSize = 12, maxSize = 500, center = FALSE)
+poi <- 'GOCC_GABA_ERGIC_SYNAPSE'
+# poi <- 'GOBP_COMPLEMENT_ACTIVATION'
+gesecaRes %>% filter(pathway == poi)
+```
+
+Convert seurat object to v3 in order for `addGesecaScores` to work:
+
+```{r}
+obj[["spatial_v3"]] <- as(object = obj[["spatial"]], Class = "Assay")
+DefaultAssay(obj) <- 'spatial_v3'
+# ps <- plotCoregulationProfileSpatial(pathways[topPathways], obj,
+#                                      title=titles, assay = 'spatial_v3',
+#                                      images = 'PDC069', image.scale = 'hires', pt.size.factor = 5)
+# cowplot::plot_grid(plotlist=ps, ncol=2)
+```
+
+```{r}
+obj2 <- fgsea:::addGesecaScores(list(pathway = pathways[[poi]]), obj, 
+                                assay = 'spatial_v3', scale = TRUE)
+```
+
+```{r}
+SpatialFeaturePlot(obj2, image.scale = 'hires', pt.size.factor = 3, images = 'PDC082', feature = 'pathway', image.alpha = 0) +
+    scale_fill_gradientn(colours = Seurat:::SpatialColors(n = 100)) +
+    labs(title = 'GO: GABAergic Synapse enrichment in iLBD')
+```
+

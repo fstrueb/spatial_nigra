@@ -1,0 +1,466 @@
+---
+title: "Figure 4 v2"
+author: "felix.struebing@med.uni-muenchen.de"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r message = FALSE}
+source('make_metad.R')
+source('helper_functions.R')
+source('../../ggplot_theme_FLS.R')
+source('../ggplot_theme_FLS_nigrapaper.R')
+library(patchwork)
+excludesamples <- read_lines('../resources/excludesamples.txt')
+```
+
+## Import data
+
+```{r}
+metad <- make_metad() %>% 
+    mutate(group = ifelse(group == 'ADLBD', 'ADLBP', group))
+seurat <- readRDS('../resources/seurat_clustered_annotated_4excludesamples_MAGIC.rds')
+# seurat_subset <- subset(seurat, group %in% c('Ctrl', 'iLBD', 'PD'))
+DefaultAssay(seurat) <- 'spatial'
+clusteranno <- data.frame(cluster_numeric = seurat$cluster, cluster_anno = seurat$cluster_anno) %>%
+    remove_rownames() %>% unique()
+```
+
+We import the proteomics data and remove a few proteins that are known to be contaminants, such as Keratins (removed n = 55):
+
+```{r}
+idmap <- read_delim('/earth/spatial_SR_TK/proteomics/sample_to_ids.txt') %>% 
+    mutate(internal_ID = as.character(`Internal ID`)) %>% 
+    mutate(group = case_when(Group == "Alzheimer's disease" ~ 'AD',
+                             Group == 'Alz. dis. / Lewy bodies variant' ~ 'ADLBD',
+                             TRUE ~ Group))
+# metad <- read_delim('/earth/spatial_SR_TK/proteomics/report_2pep_statistics.txt')
+prots <- readxl::read_excel('../resources/report_2pep_cons_annotated.xlsx')
+# names(prots)
+contaminants <- readxl::read_xlsx('../resources/Contaminant protein information in the FASTA library and the potential source of contaminations.xlsx', skip = 1)
+table(prots$Protein.Names %in% contaminants$`Entry name`)
+prots <- dplyr::filter(prots, !Protein.Names %in% contaminants$`Entry name`)
+```
+
+## Protein DE prep
+
+```{r}
+prots_long <- prots %>% 
+    dplyr::select(Genes, starts_with('INT')) %>% 
+    pivot_longer(-Genes) %>% 
+    separate(name, into = c('internal_ID', 'cluster', 'rep'), sep = '-') %>% 
+    mutate(internal_ID = str_sub(internal_ID, start = 5L)) %>% 
+    left_join(idmap, by = c('internal_ID')) %>% 
+    dplyr::select(Genes, cluster, value, case = `Case ID`, group) %>% 
+    dplyr::filter(Genes != 'NA') %>% 
+    mutate(cluster = ifelse(cluster == '1', 'Fibers', 'SNpc')) %>% 
+    filter(!case %in% excludesamples)
+length(unique(prots_long$case))
+```
+
+
+### Supp. Fig. 5a
+
+```{r fig.width = 3, fig.height=5}
+prots_long %>% group_by(cluster, case, group) %>% 
+    dplyr::count(dropouts = is.na(value)) %>% 
+    dplyr::filter(dropouts == FALSE) %>% 
+    arrange(-n) %>% 
+    group_by(group) %>% 
+    summarize(mean_n = mean(n), stdev_n = sd(n)) %>% 
+    reorder_groups(.) %>% 
+    ggplot(aes(x = group, y = mean_n, ymax = mean_n + stdev_n, ymin = mean_n - stdev_n, fill = group)) +
+    geom_col(color = 'black') +
+    geom_errorbar(width = 0.2) +
+    scale_fill_manual(values = group_colors$color) +
+    labs(x = '', y = 'Mean number of detected proteins', title = 'Detected proteins') +
+    guides(fill = 'none') +
+    theme_patch()
+```
+
+
+We filter for proteins present in all groups with expression values in at least 3 replicates:
+
+```{r}
+good_prots <- prots_long %>% 
+    ungroup() %>% 
+    group_by(cluster, Genes, group) %>% 
+    dplyr::mutate(prot_present = sum(!is.na(value))) %>% 
+    ungroup() %>%
+    dplyr::select(-case) %>% 
+    unique() %>% 
+    dplyr::filter(prot_present >= 3) %>% # protein present in at least 3 replicates
+    dplyr::select(-value, -prot_present) %>% 
+    unique() %>% 
+    group_by(Genes, cluster) %>%
+    tally() %>% 
+    dplyr::filter(n == 5) %>% # protein present across all groups in at least 3 reps (see above)
+    split(.$cluster) %>% 
+    lapply(., function(x) {x %>% dplyr::pull(Genes) %>% unique(.)})
+lapply(good_prots, length)
+```
+
+
+```{r}
+prots_long_list <- prots_long %>%
+    split(., .$cluster)
+names(prots_long_list) == names(good_prots) # sanity check
+prots_clean <- mapply(function(x, y) {
+    x %>% dplyr::filter(Genes %in% y) %>%
+        dplyr::filter(!is.na(value))
+}, x = prots_long_list, y = good_prots, SIMPLIFY = FALSE)
+```
+
+## Comparison with Transcriptome
+
+Get unnormalized counts from the ST experiments, normalize them to cpm:
+
+```{r}
+pb_list <- readRDS('../exports/pseudobulk_gex_noNorm.rds') %>% 
+    lapply(., NormalizeData) %>% 
+    lapply(., edgeR::cpm, normalized.lib.sizes = TRUE, log = FALSE) %>% 
+    lapply(., scale, center = TRUE, scale = FALSE) %>% 
+    lapply(., as.data.frame) %>% 
+    lapply(., function(x) x %>% rownames_to_column('gene'))
+txcounts <- lapply(pb_list, function(x) {
+    colnames(x)[2:29] <- str_sub(colnames(x)[2:29], start = 4L)
+    x
+}) %>% rbindlist(., idcol = 'cluster')
+```
+
+
+```{r}
+txcounts_comp <- txcounts %>% 
+    pivot_longer(-c(gene, cluster)) %>% 
+    separate(name, into = c('group', 'case'), sep = '_') %>% 
+    mutate(case = ifelse(grepl('^NBB', case), str_replace(str_sub(case, start = 4L), '_', '-'), case)) %>%
+    # separate(name, into = c('case', 'cluster'), sep = '_') %>% 
+    dplyr::filter(cluster %in% c('Fibers', 'SNpc')) %>% 
+    select(cluster, gene, group, case, tx_cpm = value) %>% 
+    split(., .$cluster) 
+# lapply(., function(x) {x %>% 
+#         mutate(tx_cpm_log2 = scale(log2(tx_cpm), center = TRUE, scale = FALSE))})
+# table(txcounts$case)
+```
+
+
+```{r}
+tx_temp <- rbindlist(txcounts_comp)
+pt_temp <- rbindlist(prots_clean) %>% 
+    select(cluster, gene = Genes, group, case, pt_intensity = value)
+table(unique(tx_temp$gene) %in% unique(pt_temp$gene))
+tx_pt_comp <- inner_join(tx_temp, pt_temp, by = c('cluster', 'case', 'gene', 'group')) %>% 
+    filter(tx_cpm > 0) %>% 
+    mutate(cpm_centered = scale(log2(tx_cpm), center = TRUE, scale = FALSE)) %>% 
+    mutate(ptint_centered = scale(log2(pt_intensity), center = TRUE, scale = FALSE))
+```
+
+
+
+Correlation between transcriptome cpm and intensities:
+
+```{r}
+cor(tx_pt_comp$tx_cpm, tx_pt_comp$pt_intensity)
+cor(tx_pt_comp$cpm_centered, tx_pt_comp$ptint_centered)
+summary(lm(tx_pt_comp$tx_cpm ~ tx_pt_comp$pt_intensity))
+```
+
+### 4a
+
+```{r}
+lm_fibers <- tx_pt_comp %>% filter(cluster == 'SNpc') %>% 
+    lm(cpm_centered ~ ptint_centered, data = .) %>% 
+    summary(.)
+cor(tx_pt_comp %>% filter(cluster == 'Fibers') %>% pull(cpm_centered), tx_pt_comp %>% filter(cluster == 'Fibers') %>% pull(ptint_centered))
+cor(tx_pt_comp %>% filter(cluster == 'SNpc') %>% pull(cpm_centered), tx_pt_comp %>% filter(cluster == 'SNpc') %>% pull(ptint_centered))
+p4a_anno <- data.frame(
+    label = c('R = 0.28, p < 2e-16', 'R = 0.33, p < 2e-16'),
+    cluster = c('Fibers', 'SNpc')
+)
+tx_pt_comp %>% 
+    ggplot(aes(x = cpm_centered, y = ptint_centered)) +
+    # geom_point(alpha = 0.2) +
+    geom_hex(bins = 50) +
+    geom_smooth(method = 'lm', color = 'black') +
+    scale_fill_continuous(type = 'viridis') +
+    facet_wrap(~cluster) +
+    labs(title = 'Transcriptome/Proteome correlation', x= 'Transcriptome [cpm, scaled]', y = 'Proteome [norm. intensity, scaled]') +
+    geom_text(data = p4a_anno, mapping = aes(x = -Inf, y = -Inf, label = label),
+              hjust = -0.1, vjust = -1) +
+    theme_patch()
+```
+
+## PCA & DE
+
+Since we have intensity values, we need to log2-transform the data:
+
+```{r}
+prots_clean_mat <- lapply(prots_clean, function(x) {
+    x %>% 
+        dplyr::select(-cluster, -group) %>% 
+        unique() %>% 
+        pivot_wider(names_from = 'case', values_from = 'value') %>% 
+        column_to_rownames('Genes') %>% 
+        as.matrix(.) %>% 
+        log2(.)
+})
+boxplot(prots_clean_mat[[1]], las=2, main = 'log2 variances for cluster 0, not median-centered')
+boxplot(prots_clean_mat[[2]], las=2, main = 'log2 variances for cluster 1, not median-centered')
+prots_clean_mat <- lapply(prots_clean_mat, function(x) {scale(x, center = TRUE, scale = FALSE)})
+boxplot(prots_clean_mat[[1]], las=2, main = 'log2 variances for cluster 0, median-centered')
+boxplot(prots_clean_mat[[2]], las=2, main = 'log2 variances for cluster 1, median-centered')
+```
+
+<!-- ```{r} -->
+<!-- clean_comp <- prots_clean_mat %>% lapply(., function(x) { -->
+<!--     as.data.frame(x) %>%  -->
+<!--         rownames_to_column('gene') %>%  -->
+<!--         pivot_longer(-gene) %>%  -->
+<!--         select(gene, case = name, logpeps = value)  -->
+<!-- }) %>% rbindlist(idcol = 'cluster') %>%  -->
+<!--     left_join(., tx_temp, by = c('cluster', 'gene', 'case')) %>%  -->
+<!--     na.omit() %>%  -->
+<!--     group_by(cluster) %>%  -->
+<!--     mutate(logpeps_scaled = scale(logpeps, center = FALSE), -->
+<!--            tx_cpm_scaled = scale(tx_cpm, center = FALSE)) -->
+<!-- ``` -->
+<!-- ## Annotation -->
+
+<!-- ```{r} -->
+<!-- `%ni%` <- Negate(`%in%`) -->
+<!-- names(prots_clean_mat) -->
+<!-- temp_anno <- bind_rows(prots_clean_mat[[1]] %>% as.data.frame(.) %>% rownames_to_column('gene') %>% mutate(cluster = 'Fibers'),  -->
+<!--                        prots_clean_mat[[2]] %>% as.data.frame(.) %>% rownames_to_column('gene')) %>% mutate(cluster = 'SNpc') -->
+<!-- temp_anno %>% group_by(cluster, gene) %>% tally() %>%  -->
+<!--     filter(n == 1) -->
+<!-- common_prots <- intersect(rownames(prots_clean_mat[[2]]), rownames(prots_clean_mat[[1]])) -->
+<!-- fibers_prots <- rownames(prots_clean_mat[[1]])[rownames(prots_clean_mat[[2]]) %ni% rownames(prots_clean_mat[[1]])] -->
+<!-- snpc_prots <- rownames(prots_clean_mat[[2]])[rownames(prots_clean_mat[[1]]) %ni% rownames(prots_clean_mat[[2]])] -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # enrichdbs <- c('Tabula_Sapiens', enrichdbs) -->
+<!-- common_anno <- enrichR::enrichr(genes = common_prots, databases = enrichdbs) %>%  -->
+<!--     rbindlist(., idcol = 'db') %>%  -->
+<!--     filter(Adjusted.P.value < 0.1) -->
+<!-- fibers_anno <- enrichR::enrichr(genes = fibers_prots, databases = enrichdbs) %>%  -->
+<!--     rbindlist(., idcol = 'db') %>%  -->
+<!--     filter(Adjusted.P.value < 0.1) -->
+<!-- snpc_anno <- enrichR::enrichr(genes = snpc_prots, databases = enrichdbs) %>%  -->
+<!--     rbindlist(., idcol = 'db') %>%  -->
+<!--     filter(Adjusted.P.value < 0.1) -->
+<!-- ``` -->
+
+### Supp. Fig. 5b
+
+```{r}
+nrow(prots_clean_mat[[1]])
+nrow(prots_clean_mat[[2]])
+library(eulerr)
+p4venn <- euler(c('Fibers' = nrow(prots_clean_mat[[1]]), 'SNpc' = nrow(prots_clean_mat[[2]]), 'Fibers&SNpc' = length(common_prots)), input = 'union')
+plot(p4venn, counts = TRUE, font = 1, cex = 1, alpha = 0.8, fill = c('#A3A500', '#00BF7D'))
+```
+
+<!-- Enrichd: -->
+
+<!-- ```{r} -->
+<!-- plotEnrich(fibers_anno %>% group_by(db) %>% slice_min(Adjusted.P.value, n = 3), y = 'Ratio', title = 'Fibers') -->
+<!-- fibers_anno %>% group_by(db) %>% slice_max(Combined.Score, n = 3) -->
+
+<!-- p4c1 <- plotEnrich(snpc_anno %>% filter(!grepl('Macromolecule Depalmitoylation|Cortical', Term)) %>% group_by(db) %>% slice_max(Combined.Score, n = 2), y = 'Ratio', title = 'SNpc', xlab = '') + -->
+<!--     guides(fill = 'none') + theme_patch() -->
+<!-- p4c2 <- plotEnrich(fibers_anno %>% filter(!grepl('ESCRT|Amphisome Membrane|Vesicle Fusion', Term)) %>% group_by(db) %>% slice_max(Combined.Score, n = 2), y = 'Ratio', title = 'Fibers', xlab = '') + -->
+<!--     guides(fill = 'none') + theme_patch() -->
+<!-- ``` -->
+
+<!-- Export legend for Annos: -->
+
+<!-- ```{r} -->
+<!-- pdf('Figure4_GO_legend_anno.pdf') -->
+<!-- plotEnrich(snpc_anno %>% filter(!grepl('Macromolecule Depalmitoylation|Cortical', Term)) %>% group_by(db) %>% slice_max(Combined.Score, n = 2), y = 'Ratio', title = 'SNpc', xlab = '') -->
+<!-- dev.off() -->
+<!-- ``` -->
+
+
+## DE plots
+
+Get minimum number of PSMs per case and gene for estimating prior variances in proteome data, we're using [this tool](https://www.bioconductor.org/packages/release/bioc/html/DEqMS.html).
+
+```{r}
+prots_long_psms <- prots %>% 
+    dplyr::select(Genes, starts_with('PEP')) %>% 
+    pivot_longer(-Genes) %>% 
+    separate(name, into = c('internal_ID', 'cluster', 'rep'), sep = '-') %>% 
+    mutate(internal_ID = str_sub(internal_ID, start = 5L)) %>% 
+    left_join(idmap, by = c('internal_ID')) %>% 
+    dplyr::select(Genes, cluster, value, case = `Case ID`, group) %>% 
+    dplyr::filter(Genes != 'NA')
+prots_min_psms <- mapply(function(x, y) {
+    idcluster <- y
+    idnames <- colnames(x)
+    idgenes <- rownames(x)
+    prots_long_psms %>% 
+        dplyr::filter(cluster == idcluster) %>% 
+        dplyr::filter(Genes %in% idgenes & case %in% idnames) %>% 
+        dplyr::select(-cluster, -case, -group) %>% 
+        group_by(Genes) %>%
+        slice_min(value) %>% unique() %>% 
+        # arrange(-value)
+        column_to_rownames('Genes') %>% 
+        as.matrix(.)
+}, x = prots_clean_mat, y = c('1', '2'), SIMPLIFY = FALSE)
+```
+
+
+```{r}
+mygroups <- as.factor(mdvec_prot(prots_clean_mat$SNpc, 'group'))
+mysexes <- as.factor(mdvec_prot(prots_clean_mat$SNpc, 'sex'))
+```
+
+```{r}
+design <- model.matrix( ~ 0 + mygroups + mysexes)
+colnames(design) <- str_remove(colnames(design), 'mygroups')
+contrasts <- makeContrasts(
+    AD.vs.ADLBP = AD-ADLBP,
+    AD.vs.Ctrl = AD - Ctrl,
+    ADLBP.vs.Ctrl = ADLBP - Ctrl,
+    PD.vs.ADLBP = PD - ADLBP,
+    PD.vs.Ctrl = PD - Ctrl,
+    PD.vs.iLBD = PD - iLBD,
+    iLBD.vs.Ctrl = iLBD - Ctrl,
+    levels = design)
+```
+
+### 4e
+
+```{r}
+res_groups_snpc <- DEqMS_pipe(prots_clean_mat$SNpc, prots_min_psms$SNpc, design, contrasts)
+prot_snpc <- plot_DE_prot(deqms = res_groups_snpc %>% filter(test == 'iLBD.vs.Ctrl'), mytitle = paste0('SNpc: iLBD vs. Ctrl')) +
+    theme_patch() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+prot_snpc
+```
+
+Table with DEG numbers:
+
+```{r}
+res_groups_snpc %>% filter(significant == 'yes') %>% group_by(test) %>% 
+    tally()
+```
+
+<!-- #### Supplement: SNpc proteome volcanoes -->
+
+<!-- ```{r} -->
+<!-- supp_prots_snpc <- lapply(unique(res_groups_snpc$test), function(x) { -->
+<!--     plot_DE_prot(deqms = res_groups_snpc %>% filter(test == x), mytitle = paste0('SNpc: ', x)) + theme_patch() -->
+<!-- }) -->
+<!-- wrap_plots(supp_prots_snpc[2:7])     -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- pdf('S_Fig_protvolcanos.pdf', width = 10, height = 12) -->
+<!-- wrap_plots(supp_prots_snpc[2:7])     -->
+<!-- dev.off() -->
+<!-- ``` -->
+
+### 4c,d
+
+```{r}
+mygroups <- as.factor(mdvec_prot(prots_clean_mat$Fibers, 'group'))
+mysexes <- as.factor(mdvec_prot(prots_clean_mat$Fibers, 'sex'))
+```
+
+```{r}
+design <- model.matrix( ~ 0 + mygroups + mysexes)
+colnames(design) <- str_remove(colnames(design), 'mygroups')
+contrasts <- makeContrasts(
+    AD.vs.ADLBP = AD-ADLBP,
+    AD.vs.Ctrl = AD - Ctrl,
+    ADLBP.vs.Ctrl = ADLBP - Ctrl,
+    PD.vs.ADLBP = PD - ADLBP,
+    PD.vs.Ctrl = PD - Ctrl,
+    PD.vs.iLBD = PD - iLBD,
+    iLBD.vs.Ctrl = iLBD - Ctrl,
+    levels = design)
+```
+
+```{r}
+res_groups_fibers <- DEqMS_pipe(prots_clean_mat$Fibers, prots_min_psms$Fibers, design, contrasts)
+```
+
+```{r}
+res_groups_fibers %>% filter(significant == 'yes') %>% 
+    mutate(direction = ifelse(logFC < 0, 'down', 'up')) %>%  
+    group_by(test, direction) %>% 
+    tally()
+# enrichr(res_groups_fibers %>% filter(test == 'PD.vs.ADLBP' & significant == 'yes' & logFC > 0) %>% pull(gene), enrichdbs) %>% 
+#     rbindlist(idcol = 'db') %>% 
+#     filter(Adjusted.P.value < 0.1) %>% 
+#     arrange(-Combined.Score)
+```
+
+
+```{r}
+prot_fibers_1 <- plot_DE_prot(deqms = res_groups_fibers %>% filter(test == 'ADLBP.vs.Ctrl'), mytitle = paste0('Fibers: AD+LBP vs. Ctrl')) + theme_patch()
+prot_fibers_2 <- plot_DE_prot(deqms = res_groups_fibers %>% filter(test == 'PD.vs.ADLBP'), mytitle = paste0('Fibers: PD vs. AD+LBP')) + theme_patch()
+prot_fibers <- lapply(unique(res_groups_fibers$test), \(x) {plot_DE_prot(deqms = res_groups_fibers %>% filter(test == x), mytitle = paste0('Fibers: ', x)) +theme_patch() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())})
+```
+
+Separate p4a:
+
+```{r}
+p4a1 <- tx_pt_comp %>% 
+    filter(cluster == 'Fibers') %>% 
+    ggplot(aes(x = cpm_centered, y = ptint_centered)) +
+    # geom_point(alpha = 0.2) +
+    geom_hex(bins = 50) +
+    geom_smooth(method = 'lm', color = 'black') +
+    scale_fill_continuous(type = 'viridis') +
+    labs(title = 'Transcriptome/Proteome correlation: Fibers', x= 'Transcriptome [cpm, scaled]', y = 'Proteome [norm. intensity, scaled]') +
+    geom_text(data = p4a_anno[1,], mapping = aes(x = -Inf, y = -Inf, label = label),
+              hjust = -0.1, vjust = -1) +
+    theme_patch()
+p4a2 <- tx_pt_comp %>% 
+    filter(cluster == 'SNpc') %>% 
+    ggplot(aes(x = cpm_centered, y = ptint_centered)) +
+    # geom_point(alpha = 0.2) +
+    geom_hex(bins = 50) +
+    geom_smooth(method = 'lm', color = 'black') +
+    scale_fill_continuous(type = 'viridis') +
+    labs(title = 'Transcriptome/Proteome correlation: SNpc', x= 'Transcriptome [cpm, scaled]', y = 'Proteome [norm. intensity, scaled]') +
+    geom_text(data = p4a_anno[2,], mapping = aes(x = -Inf, y = -Inf, label = label),
+              hjust = -0.1, vjust = -1) +
+    theme_patch()
+```
+
+
+```{r fig.width=12, fig.height=10}
+p4abc_layout <- "
+AABBBB
+AABBBB
+CCDD##
+CCDD##
+"
+p4temp <- wrap_plots(prot_fibers[[1]], prot_fibers[[2]])
+p4abc <- wrap_plots(p4a1, p4temp, p4a2, prot_snpc) + plot_layout(design = p4abc_layout)
+p4abc
+```
+```{r}
+res_groups_fibers %>% 
+    dplyr::filter(test == 'PD.vs.ADLBP' & significant == 'yes') %>% 
+    mutate(direction = ifelse (logFC > 0, 'up', 'down')) %>% 
+    group_by(direction) %>% 
+    tally()
+```
+### 4f
+
+```{r}
+DefaultAssay(seurat) <- 'MAGIC_spatial'
+SpatialFeaturePlot(seurat, images = c('PDC078', 'PDC082'), features = 'C1QC', image.scale = 'hires', image.alpha = 0.5, pt.size.factor = 3, keep.scale = 'feature', ncol = 1) & NoLegend()
+```
+

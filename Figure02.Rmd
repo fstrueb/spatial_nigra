@@ -1,0 +1,289 @@
+---
+title: "Figure 2"
+author: "felix.struebing@med.uni-muenchen.de"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries
+
+```{r}
+source('make_metad.R')
+source('helper_functions.R')
+source('../../ggplot_theme_FLS.R')
+library(scCustomize)
+library(patchwork)
+source('../ggplot_theme_FLS_nigrapaper.R')
+```
+
+## Data import
+
+Disclaimer: Use SCT normalized data slot without MAGIC for percent of tissue expressing feature, otherwise for visualization use MAGIC_spatial and spatial for DE.
+
+```{r}
+metad <- make_metad()
+seurat <- readRDS('../resources/seurat_clustered_annotated_4excludesamples_MAGIC_SCT.rds')
+DefaultAssay(seurat) <- 'SCT'
+seurat_subset <- subset(seurat, group %in% c('Ctrl', 'iLBD', 'PD'))
+```
+
+Make a colormap:
+
+```{r}
+colormap <- c(
+    Ctrl = '#b2df8a',
+    iLBD = '#a6cee3',
+    PD = '#1f78b4'
+)
+```
+
+## Calculations and plotting
+
+### 2a
+
+Percent of tissue spots expressing genes
+
+```{r}
+percex <- Percent_Expressing(seurat, features = c('TH', 'SLC18A2', 'SLC6A3'), group_by = 'orig.ident', layer = 'counts', entire_object = FALSE) |> 
+    rownames_to_column('Gene') |> 
+    pivot_longer(-Gene, names_to = 'case') |> 
+    # mutate(ifelse(grepl('NBB', temp), str_))
+    # separate(temp, into = c('case', 'cluster'), sep = '_') %>% 
+    left_join(metad, by = c('case'))
+mycomparisons <- list(c('Ctrl', 'iLBD'), c('Ctrl', 'PD'), c('iLBD', 'PD'))
+# mycomparisons <- list(c('AD', 'ADLBD'), c('AD', 'Ctrl'), c('AD', 'iLBD'), c('AD', 'PD'), c('ADLBD', 'Ctrl'), c('ADLBD', 'iLBD'), c('ADLBD', 'PD'), c('Ctrl', 'iLBD'), c('Ctrl', 'PD'), c('iLBD', 'PD'))
+plotfun <- function(gene) {
+    percex |> filter(Gene == gene) |> 
+        ggplot(aes(x = group, y = value/100, fill = group)) +
+        geom_bar(stat = 'summary', fun = 'mean', position = 'dodge', color = 'black') + 
+        stat_summary(geom = 'errorbar', fun.data = mean_se, position = 'dodge', width = 0.4, alpha = 0.75) +
+        geom_jitter(alpha = 0.75, height = 0, width = 0.2) +
+        stat_compare_means(comparisons = mycomparisons, label = 'p.signif', vjust = -0.1, step.increase = 0.2, method = 't.test', method.args = list(alternative = 'greater'),size = smallsize * 0.36) +
+        scale_fill_discrete(guide = 'none', type = colormap) +
+        scale_y_continuous(labels = scales::percent) +
+        labs(x = '', y = '', title = gene) +
+        theme_patch() +
+        theme(axis.text.x = element_text(angle = 90))
+}
+lapply(unique(percex$Gene), plotfun)
+```
+
+### 2c
+
+```{r}
+seurat <- readRDS('../resources/seurat_clustered_annotated_4excludesamples_MAGIC.rds')
+DefaultAssay(seurat) <- 'MAGIC_spatial'
+seurat_subset <- subset(seurat, group %in% c('Ctrl', 'iLBD', 'PD'))
+```
+
+Cell distribution per group:
+
+```{r}
+celldist <- data.frame(seurat_subset$cluster_anno) %>% 
+    rownames_to_column('spatial_location') %>% 
+    mutate(case = str_sub(spatial_location, end = -20L)) %>% 
+    left_join(metad, by = 'case')
+celldist %>% group_by(group, seurat_subset.cluster_anno) %>% 
+    tally() %>% 
+    group_by(group) %>% 
+    mutate(all_counts = sum(n), fraction = round(n/all_counts, digits = 2)) %>% 
+    ggplot(aes(x = group, y = n, fill = seurat_subset.cluster_anno)) +
+    geom_col(position = 'fill', color = 'black') +
+    # geom_bar(position = position_fill(), color = 'black') +
+    geom_text(aes(label = scales::percent(fraction)), position = position_fill(vjust = 0.5), color = 'white', size = smallsize * 0.36) +
+    scale_y_continuous(labels = scales::percent) +
+    labs(x = '', y = '', title = 'Spatial cluster distributions', fill = 'Cluster') +
+    theme_patch() +
+    theme(axis.text.x = element_text(angle = 90))
+```
+
+### 2b
+
+```{r}
+SpatialDimPlot(seurat, group.by = 'cluster_anno', images = 'NBB2014_079', pt.size.factor = 3.5, alpha = 1, label = FALSE, image.scale= 'hires', label.size = 1) + NoLegend()
+```
+
+### 2d
+
+```{r}
+allmarkers <- read_tsv('../resources/seurat_spatial_allmarkers_4exludesamples.tsv')
+bestmarkers <- allmarkers %>% 
+    mutate(delta_pct = pct.1 - pct.2,
+           score = delta_pct * abs(avg_log2FC)) %>% 
+    filter(gene != 'NEFM') %>% 
+    group_by(cluster) %>% 
+    slice_max(score, n = 3)
+```
+
+Reorder clusters:
+
+```{r}
+seurat@active.ident <- factor(seurat@active.ident, 
+                            levels=c("CerPed", 
+                                     "Fibers",
+                                     "SNpc", 
+                                     "SNpr", 
+                                     "SNtrans"))
+Idents(seurat) <- seurat$cluster_anno
+```
+
+```{r}
+DefaultAssay(seurat) <- 'spatial'
+DotPlot(seurat, features = unique(bestmarkers$gene), cols = c('firebrick1', 'dodgerblue1'), 
+        cluster.idents = FALSE, scale.by = 'radius') +
+    labs(x = '', y = '') + theme_patch() + RotatedAxis()
+```
+
+### 2f 
+
+```{r}
+myCSIDE <- readRDS('../resources/myRCTD_reps_fullmode.rds')
+all_weights <- list()
+for (i in 1:length(myCSIDE@RCTD.reps)){
+    weights <- myCSIDE@RCTD.reps[[i]]@results$weights
+    norm_weights <- normalize_weights(weights)
+    all_weights[i] <- norm_weights
+}
+names(all_weights) <- names(myCSIDE@group_ids)
+```
+
+```{r}
+myclusters <- data.frame(cluster = seurat$cluster_anno) %>% 
+    rownames_to_column('cluster_spot') %>% 
+    mutate(spot = str_sub(cluster_spot, start = -18L),
+           sample = str_sub(cluster_spot, start =  1L, end = -20L)) %>% 
+    select(spot, cluster, sample) %>% 
+    split(., .$sample)
+all(names(myclusters) == names(all_weights))
+cluster_celltypes <- mapply(function(weights, cluster) {
+    # weights <- all_weights[[1]]
+    # cluster = myclusters[[1]]
+    as.data.frame(weights) %>% 
+        rownames_to_column('spot') %>% 
+        pivot_longer(-spot, names_to = 'celltype', values_to = 'weight') %>% 
+        left_join(., cluster, by = 'spot')
+        # group_by(spot) %>%
+        # slice_max(weight, n = 5, with_ties = FALSE)
+}, weights = all_weights, cluster = myclusters, SIMPLIFY = FALSE) %>% rbindlist()
+```
+
+```{r}
+library(tidytext)
+top_celltypes <- cluster_celltypes %>% 
+    group_by(cluster, celltype) %>% 
+    summarize(mean_weight = mean(weight)) %>% 
+    ungroup() %>% 
+    group_by(cluster) %>% slice_max(mean_weight, n = 5) %>% 
+    # mutate(celltype = factor(celltype)) %>% 
+    mutate(ct_group = case_when(
+        grepl('Astro', celltype) ~ 'Astro',
+        grepl('Endo', celltype) ~ 'Vascular',
+        grepl('Ex_', celltype) ~ 'Neuron (non-DA)',
+        grepl('Olig', celltype) ~ 'Oligo',
+        grepl('CALB1|SOX6', celltype) ~ 'Neuron (DA)',
+        TRUE ~ celltype
+    )) %>% 
+    ungroup() %>% 
+    dplyr::select(-celltype) %>% 
+    group_by(ct_group, cluster) %>% 
+    summarise(mean_weight = sum(mean_weight)) %>% 
+    pivot_wider(names_from = ct_group, values_from = mean_weight, names_prefix = 'ct') %>% 
+    mutate(ctOther = 1 - rowSums(across(where(is.numeric)), na.rm = TRUE)) %>% 
+    pivot_longer(-cluster, names_prefix = 'ct', names_to = 'celltype', values_to = 'mean_weight') %>% 
+    na.omit() %>% 
+    mutate(celltype = factor(celltype, levels = c('Astro', 'Neuron (non-DA)', 'Neuron (DA)', 'Oligo', 'Vascular', 'Other')))
+```
+
+
+### Supp Table 1 
+
+Complete list of cell subtypes:
+
+```{r}
+all_celltypes <- cluster_celltypes %>% 
+    group_by(cluster, celltype) %>% 
+    summarize(mean_weight = mean(weight)) %>% 
+    ungroup() %>% 
+    # group_by(cluster) %>% 
+    # slice_max(mean_weight, n = 5) %>% 
+    # mutate(celltype = factor(celltype)) %>% 
+    mutate(ct_group = case_when(
+        grepl('Astro', celltype) ~ 'Astro',
+        grepl('Endo', celltype) ~ 'Vascular',
+        grepl('Ex_', celltype) ~ 'Neuron (non-DA)',
+        grepl('Olig', celltype) ~ 'Oligo',
+        grepl('CALB1|SOX6', celltype) ~ 'Neuron (DA)',
+        TRUE ~ celltype
+    )) %>% 
+    ungroup()
+# write_delim(all_celltypes, 'exports/celltype_weights_by_cluster.tsv', delim = '\t')
+```
+
+ 
+```{r}
+mypal <- c(RColorBrewer::brewer.pal(5, 'Set2'), '#808080')
+p2E <- top_celltypes %>% 
+    ggplot(aes(x = '', y = reorder_within(mean_weight, celltype, cluster), fill = celltype)) +
+    geom_bar(stat = 'identity', width = 1, color = 'white') +
+    ylim(0, 1) +
+    scale_y_reordered() +
+    coord_polar("y", start = 0) +
+    facet_wrap(~cluster, scales = 'free_x') +
+    scale_fill_discrete(type = mypal) +
+    guides(fill = guide_legend(nrow = 2)) +
+    theme_patch()
+p2E_guide <- cowplot::get_legend(p2E)
+p2E_noguide <- top_celltypes %>% 
+    ggplot(aes(x = '', y = reorder_within(mean_weight, celltype, cluster), fill = celltype)) +
+    geom_bar(stat = 'identity', size = 0.1, color = 'white') +
+    # ylim(0, 1) +
+    scale_y_reordered() +
+    coord_polar("y", start = 0) +
+    facet_wrap(~cluster,  ncol = 5, scales = 'free') +
+    scale_fill_discrete(type = mypal, guide = 'none') +
+    theme_void()
+```
+
+### 2e
+
+```{r}
+DefaultAssay(seurat) <- 'MAGIC_spatial'
+p2F <- SpatialFeaturePlot(seurat, features = bestmarkers %>% slice_max(score, n = 1) %>% pull(gene), images = 'NBB2014_079', pt.size.factor = 3.5, alpha = 1, image.scale= 'hires', combine = TRUE, ncol = 5) & NoLegend()
+p2F_guide <- cowplot::get_plot_component(SpatialFeaturePlot(seurat, features = 'TH', images = 'NBB2014_079', pt.size.factor = 3.5, alpha = 1, image.scale= 'hires', combine = TRUE), 'guide-box', return_all = TRUE)[[3]]
+p2F + p2F_guide
+```
+
+
+<!-- ### Sup. Figs -->
+
+<!-- Annotation: -->
+
+<!-- ```{r} -->
+<!-- markerlist <- allmarkers %>%  -->
+<!--     filter(avg_log2FC > 0) %>%  -->
+<!--     mutate(delta_pct = pct.1 - pct.2, -->
+<!--            score = delta_pct * avg_log2FC) %>%  -->
+<!--     dplyr::filter(score > 0) %>%  -->
+<!--     split(., .$cluster) -->
+<!-- markers_anno <- lapply(markerlist, function(x) { -->
+<!--     enrichr(x$gene, databases = enrichdbs) %>%  -->
+<!--         rbindlist(., idcol = 'db') %>%  -->
+<!--         dplyr::filter(Adjusted.P.value < 0.1) -->
+<!-- }) -->
+<!-- mapply(function(x, z) {plotEnrich(x, y = 'Ratio', orderBy = 'Combined.Score', title = z)}, x = markers_anno, z = names(markers_anno), SIMPLIFY = FALSE) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- markers_anno %>% rbindlist(idcol = 'cluster') %>%  -->
+<!--     tidyr::separate(Overlap, into = c('ov_in', 'ov_total'), sep = '\\/') %>%  -->
+<!--     filter(ov_in > 3) %>%  -->
+<!--     select(cluster, db, Term, ov_in, ov_total, Adjusted.P.value, Combined.Score, Genes) %>%  -->
+<!--     group_by(cluster, db) %>%  -->
+<!--     slice_max(Combined.Score, n = 3) -->
+<!-- ``` -->
+
+

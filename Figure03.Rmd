@@ -1,0 +1,375 @@
+---
+title: "Figure 3"
+author: "felix.struebing@med.uni-muenchen.de"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Libraries / data import
+
+```{r}
+source('make_metad.R')
+source('helper_functions.R')
+source('../../ggplot_theme_FLS.R')
+library(scCustomize)
+library(patchwork)
+source('../ggplot_theme_FLS_nigrapaper.R')
+```
+
+
+```{r}
+metad <- make_metad() %>% 
+    mutate(group = ifelse(group == 'ADLBD', 'ADLBP', group))
+seurat <- readRDS('../resources/seurat_clustered_annotated_4excludesamples_MAGIC.rds')
+# seurat_subset <- subset(seurat, group %in% c('Ctrl', 'iLBD', 'PD'))
+DefaultAssay(seurat) <- 'spatial'
+clusteranno <- data.frame(cluster_numeric = seurat$cluster, cluster_anno = seurat$cluster_anno) %>%
+    remove_rownames() %>% unique()
+```
+
+```{r}
+##### Make pseudobulk matrices #####
+pb_list <- get_pseudobulk_matrix(seurat, colgroups = c('cluster', 'group'), assay = 'spatial', layer = 'counts')
+names(pb_list) <- clusteranno[match(names(pb_list), clusteranno$cluster_numeric), ]$cluster_anno
+```
+
+<!-- ## Supp. (previously 3A): MDS cluster plot -->
+
+<!-- ```{r} -->
+<!-- # clustermds <- Reduce(cbind, pb_list) -->
+<!-- # colnames(clustermds) -->
+<!-- # mypca <- prcomp(clustermds, scale = TRUE) -->
+<!-- # mydf <- data.frame(sample = rownames(mypca$rotation), x = mypca$rotation[,1], y = mypca$rotation[,2], z = mypca$rotation[,3]) %>%  -->
+<!-- # separate(sample, into = c('cluster', 'group'), sep = '_') %>%  -->
+<!-- # left_join(., clusteranno, by = c('cluster' = 'cluster_numeric')) -->
+<!-- # plotly::plot_ly(x = mydf$x, y = mydf$y, z = mydf$z, type = 'scatter3d', mode = 'markers', color = mydf$group, symbols = mydf$cluster) -->
+<!-- # #Caclulate Dist.  -->
+<!-- # mydist <- dist(clustermds)  -->
+<!-- # #Calculate MDS  -->
+<!-- # data.mds <- cmdscale(mydist, k=3) -->
+<!-- ``` -->
+
+
+<!-- ```{r} -->
+<!-- # myclusters <- as.factor(str_sub(colnames(clustermds), end = 2L)) -->
+<!-- # mygroups <- as.factor(str_sub(colnames(clustermds), start = 4L)) -->
+<!-- # design <- model.matrix(~ 0 + myclusters + mygroups) -->
+<!-- # # colnames(design) <- str_remove(colnames(design), pattern = 'mygroups') -->
+<!-- # dgelist <- make_DGEList(countmat = clustermds, design = design, filter = TRUE) -->
+<!-- # res <- plotMDS(dgelist, plot = FALSE) -->
+<!-- # mycolnames <- colnames(res$distance.matrix.squared) -->
+<!-- # mydf <- data.frame(sample = mycolnames, x = res$x, y = res$y, cluster = myclusters, group = mygroups) %>%  -->
+<!-- #     left_join(., clusteranno, by = c('cluster' = 'cluster_numeric')) %>%  -->
+<!-- #     mutate(LBP = case_when(group == 'AD' | group == 'Ctrl' ~ 'none', -->
+<!-- #                            group == 'iLBD' ~ 'medium', -->
+<!-- #                            TRUE ~ 'high')) -->
+<!-- # mydf %>%  -->
+<!-- #     ggplot(aes(x = x, y = y, color = LBP)) + -->
+<!-- #     geom_point(size = 4) + -->
+<!-- #     theme_patch() + -->
+<!-- #     facet_wrap(~cluster) -->
+<!-- ``` -->
+
+<!-- cowplot get legend hack from SO: https://stackoverflow.com/questions/78163631/r-get-legend-from-cowplot-package-no-longer-work-for-ggplot2-version-3-5-0 -->
+
+<!-- ```{r} -->
+<!-- get_legend2 <- function(plot, legend = NULL) { -->
+<!--     if (is.ggplot(plot)) { -->
+<!--         gt <- ggplotGrob(plot) -->
+<!--     } else { -->
+<!--         if (is.grob(plot)) { -->
+<!--             gt <- plot -->
+<!--         } else { -->
+<!--             stop("Plot object is neither a ggplot nor a grob.") -->
+<!--         } -->
+<!--     } -->
+<!--     pattern <- "guide-box" -->
+<!--     if (!is.null(legend)) { -->
+<!--         pattern <- paste0(pattern, "-", legend) -->
+<!--     } -->
+<!--     indices <- grep(pattern, gt$layout$name) -->
+<!--     not_empty <- !vapply( -->
+<!--         gt$grobs[indices],  -->
+<!--         inherits, what = "zeroGrob",  -->
+<!--         FUN.VALUE = logical(1) -->
+<!--     ) -->
+<!--     indices <- indices[not_empty] -->
+<!--     if (length(indices) > 0) { -->
+<!--         return(gt$grobs[[indices[1]]]) -->
+<!--     } -->
+<!--     return(NULL) -->
+<!-- } -->
+<!-- ``` -->
+
+
+<!-- ```{r fig.height=6, fig.width=2} -->
+<!-- set.seed(42) -->
+<!-- mygroups <- as.factor(str_sub(colnames(pb_list[[1]]), start = 4L)) -->
+<!-- design <- model.matrix(~ 0 + mygroups) -->
+<!-- dgelist <- mapply(\(x, y) make_DGEList(countmat = x, design = design, filter = TRUE, cname = y), x= pb_list, y = names(pb_list), SIMPLIFY = FALSE) -->
+<!-- mymds <- mapply(function(x, y) { -->
+<!--     # x <- dgelist[[1]] -->
+<!--     res <- plotMDS(x, plot = FALSE, top = 2000, method = 'logFC', gene.selection = 'common') -->
+<!--     mydf <- data.frame(group = str_sub(colnames(res$distance.matrix.squared), start = 4L), x = res$x, y = res$y) %>%  -->
+<!--         mutate(LBP = case_when(group %in% c('AD', 'Ctrl') ~ 'none', -->
+<!--                                group == 'iLBD' ~ 'medium', -->
+<!--                                TRUE ~ 'high')) -->
+<!--     mydf %>% ggplot(aes(x = x, y = y, color = LBP)) + -->
+<!--         geom_point(size = 3) + -->
+<!--         theme_patch() + -->
+<!--         theme(legend.position = 'bottom') + -->
+<!--         labs(y = '', x = '', title = y) -->
+<!-- }, x = dgelist, y = names(dgelist), SIMPLIFY = FALSE) -->
+<!-- sp3A_1 <- wrap_plots(mymds, nrow = 5) &  -->
+<!--     scale_x_continuous(limits = range(sapply(mymds, \(x) {min(x$data$x)}), sapply(mymds, \(x) {max(x$data$x)}))) & -->
+<!--     scale_y_continuous(limits = range(sapply(mymds, \(x) {min(x$data$y)}), sapply(mymds, \(x) {max(x$data$y)}))) & -->
+<!--     guides(color = 'none') & -->
+<!--     theme(plot.margin = margin(2, 2, 2, 2)) -->
+<!-- # p3A_2 <- cowplot::get_plot_component(mymds$Fibers, 'guide-box', return_all = TRUE)[[1]] -->
+<!-- sp3A_2 <- get_legend2(mymds$Fibers) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- layout <- " -->
+<!-- A -->
+<!-- A -->
+<!-- A -->
+<!-- A -->
+<!-- A -->
+<!-- B -->
+<!-- " -->
+<!-- sp3A <- sp3A_1 / sp3A_2 + plot_layout(design = layout) -->
+<!-- ``` -->
+
+## DE tests
+
+### Testing Ctrl vs. groups
+
+```{r}
+pb_list <- get_pseudobulk_matrix(seurat, colgroups = c('cluster', 'group', 'orig.ident'), assay = 'spatial', layer = 'counts')
+names(pb_list) <- clusteranno[match(names(pb_list), clusteranno$cluster_numeric), ]$cluster_anno
+# discrete variables
+mygroups <- as.factor(mdvec(pb_list[[1]], 'group'))
+mysexes <- as.factor(mdvec(pb_list[[1]], 'sex'))
+mykits <- as.factor(mdvec(pb_list[[1]], 'kit_batch'))
+mysaa_bin <- as.factor(mdvec(pb_list[[1]], 'saa_bin'))
+# continuous variables
+mysaa_median <- mdvec(pb_list[[1]], 'median_auc')
+mybraaklewy <- mdvec(pb_list[[1]], 'braak_lewy_inferred')
+mybraaktau <- mdvec(pb_list[[1]], 'braak_tau')
+```
+
+```{r}
+##### DE testing: groups #####
+design <- model.matrix(~ 0 + mygroups + mysexes + mykits)
+colnames(design) <- str_remove(colnames(design), pattern = 'mygroups')
+dgelist <- mapply(\(x, y) make_DGEList(countmat = x, design = design, filter = TRUE, cname = y), x= pb_list, y = names(pb_list), SIMPLIFY = FALSE)
+contrasts <- makeContrasts(AD.vs.Ctrl = AD - Ctrl,
+                           ADLBP.vs.Ctrl = ADLBP - Ctrl,
+                           iLBD.vs.Ctrl = iLBD - Ctrl,
+                           PD.vs.Ctrl = PD - Ctrl,
+                           levels = design)
+# ADLBD.vs.iLBD = ADLBD - iLBD
+# PD.vs.ADLBD = PD - ADLBD,
+# PD.vs.iLBD = PD - iLBD,
+res_groups_vsctrl <- mapply(\(x, y) {edgeR_DEpipe(x, design, contrasts = contrasts, alpha.fdr = 0.1, min.logFC = 0.5, cname = y)}, x = dgelist, y = names(dgelist), SIMPLIFY = FALSE)
+```
+
+```{r}
+lapply(res_groups_vsctrl, function(x) {
+  x %>% filter(significant == 'yes') %>% 
+    arrange(test, FDR)
+})
+```
+
+<!-- ```{r} -->
+<!-- enrichr(genes = res_groups_vsctrl$SNpc %>% filter(test == 'PD.vs.Ctrl' & significant == 'yes') %>% pull(gene), databases = enrichdbs) %>% rbindlist(idcol = 'db') %>% filter(Adjusted.P.value < 0.1) %>% arrange(-Adjusted.P.value) -->
+<!-- ``` -->
+
+
+### Testing groups vs. groups
+
+```{r}
+contrasts2 <- makeContrasts(PD.vs.iLBD = PD - iLBD,
+                           ADLBP.vs.AD = ADLBP - AD,
+                           levels = design)
+res_groups_vsgroups <- mapply(\(x, y) {edgeR_DEpipe(x, design, contrasts = contrasts2, alpha.fdr = 0.1, min.logFC = 0.5, cname = y)}, x = dgelist, y = names(dgelist), SIMPLIFY = FALSE)
+```
+
+
+
+```{r}
+upset_vsctrl <- rbindlist(res_groups_vsctrl, idcol = 'cluster') %>% 
+    mutate(clustertest = paste0(test, '_', cluster)) %>% 
+    filter(significant == 'yes') %>% 
+    mutate(updown = ifelse(logFC > 0, 'up', 'down')) %>% 
+    mutate(test = ifelse(test == 'ADLBP.vs.Ctrl', 'AD+LBP.vs.Ctrl', test))
+```
+
+### 3a
+
+```{r}
+res_groups_vsctrl %>% 
+  rbindlist(., idcol = 'cluster') %>% 
+  group_by(cluster, significant) %>% 
+  tally() %>% 
+  dplyr::filter(significant == 'yes') %>% 
+  ggplot(aes(x = reorder(cluster, -n), y = n)) +
+  geom_col(color = 'black', fill = 'grey80') +
+  labs(x = '', title = 'Number of DE genes (vs. Ctrl) per cluster') +
+  theme_patch() +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+
+### Supp. Fig. 4
+
+```{r}
+library(ComplexUpset)
+temp_list <- upset_vsctrl %>% 
+    dplyr::select(cluster, test, gene, updown) %>% 
+    dplyr::mutate(tempgroup = paste(test, cluster, sep = ': ')) %>% 
+    mutate(tempval = TRUE) %>% 
+    tidyr::pivot_wider(names_from = tempgroup, values_from = tempval) %>% 
+    mutate(across(-gene, ~replace_na(.x, FALSE)))
+temp_colors <- temp_list %>% 
+    dplyr::select(cluster, test) %>% 
+    mutate(set = paste0(test, ': ', cluster)) %>% 
+    dplyr::select(-test)
+clustercolors <- scales::hue_pal()(5)
+clustercolors <- setNames(clustercolors, c('CerPed', 'Fibers', 'SNpc', 'SNpr', 'SNtrans'))
+upset(temp_list, intersect = colnames(temp_list)[5:length(temp_list)], 
+                set_sizes = FALSE,
+                sort_intersections = FALSE,
+                intersections = list(
+                    'PD.vs.Ctrl: SNpc', 'AD+LBP.vs.Ctrl: CerPed', 'AD+LBP.vs.Ctrl: SNpc', 'PD.vs.Ctrl: SNtrans', 'PD.vs.Ctrl: SNpr', 'iLBD.vs.Ctrl: SNpc','PD.vs.Ctrl: CerPed',  'AD.vs.Ctrl: SNpc', 'AD.vs.Ctrl: Fibers', 'AD+LBP.vs.Ctrl: Fibers'),
+                base_annotations = list(
+                    'Intersection size' = intersection_size(counts = TRUE, mapping = aes(fill = updown))
+                ),
+                stripes = upset_stripes(mapping= aes(color = cluster),
+                                        geom = geom_segment(size = 4),
+                                        colors = clustercolors,
+                                        data = temp_colors)) +
+    labs(x = '', y = '') +
+    theme_patch() +
+    theme(axis.text.x = element_blank())
+```
+
+
+### 3b
+
+```{r}
+temp_snpc_inters <- upset_vsctrl %>% 
+    dplyr::filter(cluster == 'SNpc') %>% 
+    dplyr::select(test, gene, updown) %>% 
+    mutate(tempval = TRUE) %>% 
+    tidyr::pivot_wider(names_from = test, values_from = tempval) %>% 
+    mutate(across(-gene, ~replace_na(.x, FALSE)))
+upset(temp_snpc_inters, colnames(temp_snpc_inters)[3:6], 
+             set_sizes = FALSE,
+             base_annotations = list(
+                 ' ' = intersection_size(counts = TRUE, mapping = aes(fill = updown))
+             )) +
+    labs(x = '', y = '') +
+    theme_patch() +
+    theme(axis.text.x = element_blank()) &
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+```
+
+Determine overlaps:
+
+```{r}
+temp_snpc_inters %>% 
+    filter(PD.vs.Ctrl == TRUE & `AD+LBP.vs.Ctrl` == TRUE | 
+               `AD+LBP.vs.Ctrl` == TRUE & AD.vs.Ctrl == TRUE)
+```
+
+<!-- ### 3E: shared SNpc LBP gene -->
+
+<!-- ```{r} -->
+<!-- DefaultAssay(seurat) <- 'MAGIC_spatial' -->
+<!-- SpatialFeaturePlot(seurat, images = c('NBB2012_068', 'NBB2019_081', 'PDC078'), features = 'LRCH3', image.scale = 'hires', image.alpha = 0, pt.size.factor = 3) -->
+<!-- p3_DIRAS2 <- SpatialFeaturePlot(seurat, images = c('PD172', 'NBB2019_081', 'PDC078'), features = 'DIRAS2', image.scale = 'hires', image.alpha = 0, pt.size.factor = 3, ncol = 1) & NoLegend() -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- # VlnPlot(subset(seurat, cluster_anno == 'SNpc'), features = 'DIRAS2', group.by = c('group')) -->
+<!-- ``` -->
+
+
+### 3c,d,e
+
+```{r}
+temp <- bind_rows(res_groups_vsctrl$SNpc, res_groups_vsgroups$SNpc) %>% 
+  dplyr::filter(test %in% c('PD.vs.Ctrl', 'iLBD.vs.Ctrl', 'PD.vs.iLBD')) %>% 
+  split(., .$test)
+snpc_volcanolist <- mapply(\(x, y) {plot_volcano(x, mytitle = y, n_label = 10, mult = c(0, 0.3)) + 
+    theme_patch() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())}, x = temp, y = names(temp), SIMPLIFY = FALSE)
+```
+
+```{r fig.width = 12, fig.height=7}
+wrap_plots(snpc_volcanolist$PD.vs.Ctrl, snpc_volcanolist$iLBD.vs.Ctrl, snpc_volcanolist$PD.vs.iLBD, ncol = 3)
+```
+
+### 3f,g,h,i
+
+```{r}
+temp <- bind_rows(res_groups_vsctrl$SNpc, res_groups_vsgroups$SNpc) %>% 
+  dplyr::filter(test %in% c('AD.vs.Ctrl', 'ADLBP.vs.Ctrl', 'ADLBP.vs.AD')) %>% 
+  split(., .$test)
+snpc_volcanolist <- mapply(\(x, y) {plot_volcano(x, mytitle = y, n_label = 10, mult = c(0, 0.3)) + 
+    theme_patch() + 
+    theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())}, x = temp, y = names(temp), SIMPLIFY = FALSE)
+```
+
+```{r fig.width = 12, fig.height=7}
+wrap_plots(snpc_volcanolist$AD.vs.Ctrl, snpc_volcanolist$ADLBP.vs.Ctrl, snpc_volcanolist$ADLBP.vs.AD, ncol = 3)
+```
+
+### 3i
+
+```{r}
+cellcounts <- read_tsv('../resources/pigmented_cell_counts_SNpc.txt')
+```
+
+Get individual counts for significant genes:
+
+```{r}
+allsigs <- rbindlist(res_groups_vsctrl, idcol = 'cluster') %>% bind_rows(rbindlist(res_groups_vsgroups, idcol = 'cluster')) %>% 
+  dplyr::filter(cluster == 'SNpc') %>% 
+  filter(significant == 'yes')
+allsigs_genes <- allsigs %>%  pull(gene) %>% unique()
+snpc_counts <- pb_list$SNpc[allsigs_genes, ]
+colnames(snpc_counts) <- sub(".*_(.*)$", "\\1", colnames(snpc_counts))
+```
+
+```{r}
+cellcounts <- cellcounts %>% 
+  mutate(sample = ifelse(grepl('Alz', Cohort), paste0('NBB', `Sample ID`), `Sample ID`))
+table(cellcounts$sample %in% colnames(snpc_counts))
+cellcounts_mat <- cellcounts %>% dplyr::select(sample, `pigmented cells`) %>% 
+  pivot_wider(names_from = sample, values_from = `pigmented cells`) %>% 
+  select(colnames(snpc_counts)) %>% 
+  as.numeric()
+cellcounts_cor <- apply(snpc_counts, 1, function(x) {cor(x, cellcounts_mat)})
+```
+
+```{r}
+data.frame(value = cellcounts_cor, gene = names(cellcounts_cor)) %>% 
+  arrange(-value) %>% 
+  left_join(allsigs, by = c('gene')) %>% 
+  dplyr::filter(! test %in% c('AD.vs.Ctrl', 'iLBD.vs.Ctrl')) %>% 
+  droplevels() %>% 
+  ggplot(aes(x = value, y = logFC, color = test)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = 'lm', se = FALSE) +
+  theme_patch() +
+  labs(x = "Pearson's R", y = 'logFC', title = 'Correlation between pigmented cell counts\n and DEG gene counts vs. logFC') +
+  scale_color_brewer(type = 'qual', palette = 'Set1')
+```
+
